@@ -2,9 +2,13 @@
 #include "AlertWapper.h"
 #include "AppFramework.h"
 #include "AppMetaFlash.h"
+#include "CircleDevice.h"
+#include "CircleProduct.h"
 #include "DBConnectionPool.h"
 #include "Domino.h"
 #include "FormulaWapper.h"
+#include "LineDevice.h"
+#include "LineProduct.h"
 #include "MysqlConnectionPool.h"
 #include "UserWapper.h"
 #include "Utils.h"
@@ -16,6 +20,7 @@
 #include <QJsonObject>
 #include <QObject>
 #include <QThread>
+#include <algorithm>
 using namespace AppFrame;
 
 AppFramework &AppFramework::instance()
@@ -59,21 +64,23 @@ AppFrame::AppFrameworkImpl::AppFrameworkImpl()
                         std::bind(&AppFrameworkImpl::writePLC, this, std::placeholders::_1));
     registerExpectation(ExpectedFunction::RefreshMainPage, std::bind(&AppFrameworkImpl::refreshMainPage, this));
     registerExpectation(ExpectedFunction::RefreshPowerPage, std::bind(&AppFrameworkImpl::refreshPowerPage, this));
-
     registerExpectation(ExpectedFunction::RefreshElecData,
                         std::bind(&AppFrameworkImpl::refreshElecData, this)); // 注册直线式电能表数据
+    registerExpectation(ExpectedFunction::RefreshStrightMainPage,
+                        std::bind(&AppFrameworkImpl::refreshStrightMainPage, this));
 }
 
 AppFrame::AppFrameworkImpl::~AppFrameworkImpl() noexcept
 {
 }
 
-int AppFrame::AppFrameworkImpl::run()
+int AppFrame::AppFrameworkImpl::run(QQmlApplicationEngine *engine)
 {
     // 加载配置文件
     loadConfig();
     initLogger();
     initFile();
+    storeImagePainter(engine);
     initSqlHelper();
     initProduct();
     initNetworkClient();
@@ -81,6 +88,7 @@ int AppFrame::AppFrameworkImpl::run()
     initPLC();
     // runtime task
     timerTask();
+
     return 0;
 }
 
@@ -106,11 +114,16 @@ bool AppFrame::AppFrameworkImpl::registerExpectation(const ExpectedFunction &exp
     return ret;
 }
 
-void AppFrame::AppFrameworkImpl::storeImagePainter(const DisplayWindows &painterId, void *obj)
+void AppFrame::AppFrameworkImpl::storeImagePainter(QQmlApplicationEngine *engine)
 {
-    if (obj != nullptr)
+    uint8_t windId = 0;
+    for (const auto &item : config_["baumer"]["paramters"])
     {
-        mapStorePainter_[painterId] = static_cast<QObject *>(obj);
+        const std::string &title = item["display_window"].as<std::string>();
+        mapWindId2Index_[title] = windId;
+        auto obj = engine->rootObjects().first()->findChild<QObject *>(title.c_str());
+        mapStorePainter_[windId] = static_cast<QObject *>(obj);
+        ++windId;
     }
 }
 
@@ -180,8 +193,8 @@ std::string AppFrame::AppFrameworkImpl::getCameraParam(const std::string &value)
 {
     bool ret = false;
     auto params = Utils::stringToJson(value);
-    uint8_t winId = params["display_window"].asInt();
-    Json::Value jsVal = baumerManager_->getCamera(winId);
+    std::string winName = params["display_window"].asString();
+    Json::Value jsVal = baumerManager_->getCamera(mapWindId2Index_.at(winName));
     std::string des;
     if (jsVal.isNull())
     {
@@ -201,7 +214,8 @@ std::string AppFrame::AppFrameworkImpl::setCameraParam(const std::string &value)
     std::string des;
     if (!jsParams.isNull())
     {
-        ret = baumerManager_->setCamera(jsParams, des);
+        std::string winName = jsParams["display_window"].asString();
+        ret = baumerManager_->setCamera(mapWindId2Index_.at(winName), jsParams, des);
     }
     return Utils::makeResponse(ret, {}, std::move(des));
 }
@@ -431,7 +445,90 @@ std::string AppFrame::AppFrameworkImpl::refreshMainPage()
     jsMainVal["plcState"] = std::to_string(plcDev_->getConnect());
     jsMainVal["textProduceState"] = plcDev_->readDevice("n", "12612");
 
-    jsMainVal["textEquipmentSteps"] = plcDev_->readDevice("n", "12613");
+    std::string textEquipmentSteps = plcDev_->readDevice("n", "12613");
+    switch (std::atoi(textEquipmentSteps.c_str()))
+    {
+    case 0:
+        jsMainVal["textEquipmentSteps"] = "未启动";
+        break;
+
+    case 1:
+        jsMainVal["textEquipmentSteps"] = "条件检查";
+        break;
+
+    case 2:
+        jsMainVal["textEquipmentSteps"] = "启动各轴";
+        break;
+
+    case 4:
+        jsMainVal["textEquipmentSteps"] = "自动运行";
+        break;
+
+    case 5:
+        jsMainVal["textEquipmentSteps"] = "暂停";
+        break;
+
+    case 8:
+        jsMainVal["textEquipmentSteps"] = "点动运行";
+        break;
+
+    case 9:
+        jsMainVal["textEquipmentSteps"] = "点动暂停";
+        break;
+
+    default:
+        jsMainVal["textEquipmentSteps"] = "未获取到信息";
+        break;
+    }
+    std::vector<uint8_t> cameraState = baumerManager_->cameraState();
+    for (uint8_t i = 0; i < cameraState.size(); i++)
+    {
+        jsMainVal["image" + std::to_string(cameraState[i])] = "1";
+    }
+    std::string result = Utils::makeResponse(ret, std::move(jsMainVal));
+    return result;
+}
+
+std::string AppFrame::AppFrameworkImpl::refreshStrightMainPage()
+{
+    bool ret = true;
+    Json::Value jsMainVal;
+    jsMainVal["image0"] = "0";
+    jsMainVal["dominoState"] = std::to_string(domino_->getConnect());
+    jsMainVal["cognexState"] = std::to_string(cognex_->getConnect());
+    jsMainVal["permissionState"] = std::to_string(permission_->getConnect());
+    jsMainVal["plcState"] = std::to_string(plcDev_->getConnect());
+    std::string textEquipmentSteps = plcDev_->readDevice("di", "0006");
+    switch (std::atoi(textEquipmentSteps.c_str()))
+    {
+    case 0:
+        jsMainVal["textEquipmentSteps"] = "未开启";
+        break;
+
+    case 1:
+        jsMainVal["textEquipmentSteps"] = "待启动";
+        break;
+
+    case 2:
+        jsMainVal["textEquipmentSteps"] = "运行中";
+        break;
+
+    case 3:
+        jsMainVal["textEquipmentSteps"] = "急停中";
+        break;
+
+    case 4:
+        jsMainVal["textEquipmentSteps"] = "终止";
+        break;
+
+    case 5:
+        jsMainVal["textEquipmentSteps"] = "暂停";
+        break;
+
+    default:
+        jsMainVal["textEquipmentSteps"] = "未获取到信息";
+        break;
+    }
     std::vector<uint8_t> cameraState = baumerManager_->cameraState();
     for (uint8_t i = 0; i < cameraState.size(); i++)
     {
@@ -469,11 +566,9 @@ void AppFrame::AppFrameworkImpl::loadConfig()
     {
         std::string filePath = qApp->applicationDirPath().toStdString() + "/config.yaml";
         config_ = std::move(YAML::LoadFile(filePath));
-        LogInfo("load config yaml success.");
     }
     catch (const YAML::Exception &e)
     {
-        LogError("Error parsing YAML: {}", e.what());
         Utils::appExit(-1);
     }
 }
@@ -546,60 +641,37 @@ void AppFrame::AppFrameworkImpl::initNetworkClient()
     QObject::connect(webManager_, &WebManager::ocrRecv, [this](const std::string &json) { processOCR(json); });
     QObject::connect(webManager_, &WebManager::tangleRecv, [this](const std::string &json) { processTangle(json); });
     QObject::connect(webManager_, &WebManager::tangleCheckRecv,
-                     [this](const std::string &json) { processTangleCheck(json); });
+                     [this](const std::string &json) { processCheck(json); });
 
     // 获取到二维码并发送
-    QObject::connect(cognex_, &Cognex::ReadQRCode, [this](const std::string &value) { whenCognexRecv(value); });
+    QObject::connect(cognex_, &Cognex::ReadQRCode, [this](const std::string &value) { afterCognexRecv(value); });
     // 获取到物流码并存储
     QObject::connect(permission_, &Permission::codeRight,
-                     [this](const uint16_t number, const std::string &des, const std::string &code1,
-                            const std::string &code2) { whenPermissionRecv(number, des, code1, code2); });
+                     [this](const std::string &num, const std::string &code1, const std::string &code2) {
+                         afterPermissionRecv(num, code1, code2);
+                     });
     LogInfo("network client start success.");
 }
 
 void AppFrame::AppFrameworkImpl::initPLC()
 {
-    std::string strType = config_["plc"]["type"].as<std::string>();
-    plcDev_ = new PLCDevice;
-    plcDev_->init(config_);
-    if (strType == "circle")
+    std::string strType = config_["product"]["type"].as<std::string>();
+    if (strType == "line")
     {
-        QObject::connect(plcDev_, &PLCDevice::bottleMove,
-                         [this](const uint64_t bottomNum) { whenBottomMove(bottomNum); });
+        plcDev_ = new LineDevice;
     }
-    else if (strType == "line")
+    else if (strType == "circle")
     {
-        QObject::connect(plcDev_, &PLCDevice::lineCognex, [this]() { whenLineCognex(); });
-        QObject::connect(plcDev_, &PLCDevice::lineCoding, [this]() { whenLineCoding(); });
+        plcDev_ = new CircleDevice;
     }
     else if (strType == "cap")
     {
     }
-}
-
-void AppFrame::AppFrameworkImpl::updateRealData()
-{
-
-    Json::Value jsMainVal;
-    jsMainVal["count_all"] = 4;             // 进瓶数
-    jsMainVal["count_pass"] = 22590;        // 合格品数
-    jsMainVal["count_waste"] = 7;           // 废品总数
-    jsMainVal["count_locate_waste"] = 3;    // 定位废品数
-    jsMainVal["count_code_waste"] = 4;      // 喷码废品数
-    jsMainVal["count_pause_waste"] = 0;     // 暂停、终止废品数
-    jsMainVal["equipmentSteps"] = "未启动"; // 设备步骤
-    jsMainVal["produceState"] = 3;          // 生产状态
-    invokeCpp(&AppMetaFlash::instance(), AppMetaFlash::instance().invokeRuntimeRoutine,
-              Q_ARG(PageIndex, PageIndex::PageMain), Q_ARG(QString, Utils::jsonToString(jsMainVal).c_str()));
-}
-
-void AppFrame::AppFrameworkImpl::updateProduceRealData()
-{
-    Json::Value jsProduceVal;
-    /*生产数据界面实时更新数据*/
-
-    invokeCpp(&AppMetaFlash::instance(), AppMetaFlash::instance().invokeRuntimeRoutine,
-              Q_ARG(PageIndex, PageIndex::PageProduce), Q_ARG(QString, Utils::jsonToString(jsProduceVal).c_str()));
+    plcDev_->init(config_);
+    QObject::connect(plcDev_, &BasePLCDevice::signalQR, [this](const uint64_t bottomNum) { whenSiganlQR(bottomNum); });
+    QObject::connect(plcDev_, &BasePLCDevice::signalCoding, [this]() { whenSignalCoding(); });
+    QObject::connect(plcDev_, &BasePLCDevice::signalOCR, [this]() { whenSignaOCR(); });
+    QObject::connect(plcDev_, &BasePLCDevice::signalRemove, [this]() { whenSignaRemove(); });
 }
 
 void AppFrame::AppFrameworkImpl::updateAlertData()
@@ -623,57 +695,6 @@ void AppFrame::AppFrameworkImpl::updateFormulaData()
     }
 }
 
-void AppFrame::AppFrameworkImpl::updateByMinute(const int minute)
-{
-    // todo:电能信息写入数据库、上报
-}
-
-void AppFrame::AppFrameworkImpl::updateByDay(const int year, const int month, const int day)
-{
-    // 每日创建当月份数据表和下月份数据表做冗余
-    // 动态创建月份数据库表
-    std::string monthSingleBoottleTB = year + month + "single_bottle";
-    std::list<std::string> fields{"id SERIAL PRIMARY KEY",
-                                  "qr_code_result varchar(256)",
-                                  "logistics_code_gt char(24)",
-                                  "locate_camera_image varchar(256)",
-                                  "locate_res real",
-                                  "locate_check_camera_image varchar(256)",
-                                  "locate_check_res boolean",
-                                  "code_check_camera_image varchar(256)",
-                                  "logistics_code char(24)",
-                                  "logistics_code_res boolean",
-                                  "batch_num varchar(256)",
-                                  "formula_name varchar(128)",
-                                  "created_time timestamp DEFAULT CURRENT_TIMESTAMP",
-                                  "UNIQUE (id)"};
-
-    if (PgsqlHelper::getSqlHelper().createTable(monthSingleBoottleTB, std::move(fields)))
-    {
-        LogInfo("This month table created successfully");
-    }
-    else
-    {
-        LogInfo("Failed to create this month table");
-    }
-}
-
-void AppFrame::AppFrameworkImpl::updateSensorRealData()
-{
-    Json::Value jsSensorVal;
-
-    invokeCpp(&AppMetaFlash::instance(), AppMetaFlash::instance().invokeRuntimeRoutine,
-              Q_ARG(PageIndex, PageIndex::PageSensor), Q_ARG(QString, Utils::jsonToString(jsSensorVal).c_str()));
-}
-
-void AppFrame::AppFrameworkImpl::updateValveRealData()
-{
-    Json::Value jsValveVal;
-
-    invokeCpp(&AppMetaFlash::instance(), AppMetaFlash::instance().invokeRuntimeRoutine,
-              Q_ARG(PageIndex, PageIndex::PageValve), Q_ARG(QString, Utils::jsonToString(jsValveVal).c_str()));
-}
-
 void AppFrame::AppFrameworkImpl::initBaumerManager()
 {
     baumerManager_ = new BaumerManager();
@@ -692,11 +713,12 @@ void AppFrame::AppFrameworkImpl::initFile()
             LogWarn("create saveImageDir dir file!");
         }
     }
-    strTanglePath_ = saveImageDir + "/LocationCamera/";
-    strOcrPath_ = saveImageDir + "/CodeCheckCamera/";
-    strTangleCheckPath_ = saveImageDir + "/LocateCheckCamera/";
-    strTangleResultPath_ = saveImageDir + "/LocationCameraResult/";
-    strTangleCheckResultPath_ = saveImageDir + "/LocateCheckCameraResult/";
+    strTanglePath_ = saveImageDir + "/Location/";
+    strOcrPath_ = saveImageDir + "/CodeCheck/";
+    strTangleCheckPath_ = saveImageDir + "/LocateCheck/";
+    strTangleResultPath_ = saveImageDir + "/LocationResult/";
+    strOcrResultPath_ = saveImageDir + "/CodeCheckResult/";
+    strTangleCheckResultPath_ = saveImageDir + "/LocateCheckResult/";
     if (!qdir.exists(strTanglePath_.c_str()))
     {
         bool res = qdir.mkdir(strTanglePath_.c_str());
@@ -741,14 +763,14 @@ void AppFrame::AppFrameworkImpl::initFile()
 
 void AppFrame::AppFrameworkImpl::initProduct()
 {
-    std::string strType = config_["plc"]["type"].as<std::string>();
+    std::string strType = config_["product"]["type"].as<std::string>();
     if (strType == "circle")
     {
-        circleProduct_ = new CircleProduct();
+        product_ = new CircleProduct();
     }
     else if (strType == "line")
     {
-        lineProduct_ = new LineProduct();
+        product_ = new LineProduct();
     }
     else if (strType == "cap")
     {
@@ -768,6 +790,11 @@ void AppFrame::AppFrameworkImpl::memoryClean()
     lvFulltimeThread_.clear();
 
     // 对象清理区域
+    if (product_)
+    {
+        delete product_;
+        product_ = nullptr;
+    }
     if (plcDev_ != nullptr)
     {
         delete plcDev_;
@@ -793,16 +820,6 @@ void AppFrame::AppFrameworkImpl::memoryClean()
         delete webManager_;
         webManager_ = nullptr;
     }
-    if (circleProduct_)
-    {
-        delete circleProduct_;
-        circleProduct_ = nullptr;
-    }
-    if (lineProduct_)
-    {
-        delete lineProduct_;
-        lineProduct_ = nullptr;
-    }
     if (baumerManager_ != nullptr)
     {
         delete baumerManager_;
@@ -816,42 +833,31 @@ void AppFrame::AppFrameworkImpl::timerTask()
         while (bThreadHolder) // 线程退出Flag
         {
             // 实时捕获摄像头采集
-            cv::Mat mat;
-            mat = baumerManager_->getCamaeraMat(0);
-            if (!mat.empty())
+            for (const auto &[key, index] : mapWindId2Index_)
             {
-                afterCaputureImage(0, mat);
-                LogInfo("product process:image locate get.");
-                invokeCpp(mapStorePainter_[DisplayWindows::LocationCamera], "updateImage",
-                          Q_ARG(QImage, Utils::matToQImage(mat)));
-            }
-            mat = baumerManager_->getCamaeraMat(1);
-            if (!mat.empty())
-            {
-                afterCaputureImage(1, mat);
-                LogInfo("product process:image code get.");
-                invokeCpp(mapStorePainter_[DisplayWindows::CodeCheckCamera], "updateImage",
-                          Q_ARG(QImage, Utils::matToQImage(mat)));
-            }
-            mat = baumerManager_->getCamaeraMat(2);
-            if (!mat.empty())
-            {
-                afterCaputureImage(2, mat);
-                LogInfo("product process:image locate check get.");
-                invokeCpp(mapStorePainter_[DisplayWindows::LocateCheckCamera], "updateImage",
-                          Q_ARG(QImage, Utils::matToQImage(mat)));
+                auto mat = baumerManager_->getCamaeraMat(index);
+                if (!mat.empty())
+                {
+                    uint8_t typeALGO = 0;
+                    if (key == "Location")
+                    {
+                        typeALGO = 0;
+                    }
+                    else if (key == "OCR")
+                    {
+                        typeALGO = 1;
+                    }
+                    else if (key == "LocateCheck")
+                    {
+                        typeALGO = 2;
+                    }
+                    afterCaputureImage(typeALGO, mat);
+                    LogInfo("product process:image locate get.");
+                    invokeCpp(mapStorePainter_.at(index), "updateImage", Q_ARG(QImage, Utils::matToQImage(mat)));
+                }
             }
         }
     }));
-
-    // lvFulltimeThread_.push_back(std::thread([this] {
-    //     // 视频渲染线程
-    //     while (bThreadHolder)
-    //     {
-    //         updateVideo();
-    //         std::this_thread::sleep_for(std::chrono::milliseconds(10));
-    //     }
-    // }));
 }
 
 void AppFrame::AppFrameworkImpl::sendOneToAlgo()
@@ -875,171 +881,227 @@ void AppFrame::AppFrameworkImpl::drawText(QImage &img, const QString &text)
     pp.drawText(QPointF(20, 50), text);
 }
 
-void AppFrame::AppFrameworkImpl::whenBottomMove(const uint64_t number)
+void AppFrame::AppFrameworkImpl::drawOcrRes(QImage &img, OcrRes &ocr)
+{
+    QPainter pp(&img);
+    QFont font = pp.font();
+    font.setPixelSize(50); // 改变字体大小
+    font.setFamily("Microsoft YaHei");
+    pp.setFont(font);
+    pp.setPen(QPen(Qt::red, 5));
+    pp.setBrush(QBrush(Qt::red));
+    pp.drawText(QPointF(20, 50), QString::fromStdString(ocr.result));
+    QPointF lefttop(ocr.lefttopx, ocr.lefttopy);
+    QPointF leftbottom(ocr.leftbottomx, ocr.leftbottomy);
+    QPointF righttop(ocr.righttopx, ocr.righttopy);
+    QPointF rightbottom(ocr.rightbottomx, ocr.rightbottomy);
+    QVector<QPointF> points;
+    points << lefttop << righttop << rightbottom << leftbottom;
+    pp.drawPolygon(points);
+}
+
+void AppFrame::AppFrameworkImpl::whenSiganlQR(const uint64_t number)
 {
     Utils::asyncTask([this, number] {
-        if (circleProduct_ == nullptr)
-            return;
-
-        circleProduct_->newProduct(number);
-
-        // PLC工位从1开始计数，软件工位从0开始计数，以下工位都是软件工位
-
-        // 电机旋转工位=5 下发定位在旋转前=5
-        const auto rotate = circleProduct_->getIndex(5);
-
-        // 打码工位=9 下发复合定位在打码前=8
-        const auto locateCheck = circleProduct_->getIndex(8);
-
-        // 打码工位=9 收到进入打码工位信号立刻下发数据到打印机=9
-        // const auto printer = circleProduct_->getIndex(9);
-
-        // 打码复合工位=14 考虑图片接受时延+算法时延=16
-        const auto codeCheck = circleProduct_->getIndex(16);
-        if (rotate && !rotate->locateResult.empty())
+        if (product_->getType() == TypeProduct::TypeCircle)
         {
-            plcDev_->writeDevice("r", "13002", "", rotate->locateResult);
-            plcDev_->writeDevice("n", "12993", "", std::to_string(rotate->numBottom));
-            LogInfo("product process:write plc:number={},value={}.", rotate->numBottom, rotate->locateResult);
-        }
-        if (locateCheck)
-        {
-            if (locateCheck->logistics1.empty())
+            product_->signalQR(number);
+            // PLC工位从1开始计数，软件工位从0开始计数，以下工位都是软件工位
+
+            // 电机旋转工位=5 下发定位在旋转前=5
+            const auto rotate = product_->getIndexObject(5);
+
+            // 打码工位=9 下发复合定位在打码前=8
+            const auto locateCheck = product_->getIndexObject(8);
+
+            // 打码工位=9 收到进入打码工位信号立刻下发数据到打印机=9
+            const auto printer = product_->getIndexObject(9);
+
+            // 打码复合工位=14 考虑图片接受时延+算法时延=16
+            const auto remove = product_->getIndexObject(16);
+            if (rotate && !rotate->LocationResult.empty())
             {
-                plcDev_->writeDevice("b", "13004", "0", "0");
+                plcDev_->writeDevice("r", "13002", "", rotate->LocationResult);
+                plcDev_->writeDevice("n", "12993", "", std::to_string(rotate->bottleNum_));
+                rotate->issuedRotateTime = Utils::getCurrentTime(true);
+                LogInfo("product process:write plc:number={},value={}.", rotate->bottleNum_, rotate->LocationResult);
             }
-            else
+            if (locateCheck)
             {
-                // plcDev_->writeDataToDevice("b", "13004", "0", locateCheck->locateCheckResult);
-                plcDev_->writeDevice("b", "13004", "00", "1");
-                plcDev_->writeDevice("n", "12994", "", std::to_string(locateCheck->numBottom));
-                LogInfo("product process:locateCheck:number={},value={}.", locateCheck->numBottom,
-                        locateCheck->locateCheckResult);
-                invokeCpp(domino_, "dominoPrint", Q_ARG(std::string, locateCheck->logistics1),
-                          Q_ARG(std::string, locateCheck->logistics2));
-                LogInfo("product process:print:number={},code1={},code2={}.", locateCheck->numBottom,
-                        locateCheck->logistics1, locateCheck->logistics2);
+                if (locateCheck->logistics1.empty())
+                {
+                    plcDev_->writeDevice("b", "13004", "0", "0");
+                }
+                else
+                {
+                    // plcDev_->writeDataToDevice("b", "13004", "0", locateCheck->locateCheckResult);
+                    plcDev_->writeDevice("b", "13004", "00", "1");
+                    plcDev_->writeDevice("n", "12994", "", std::to_string(locateCheck->bottleNum_));
+                }
+                locateCheck->issuedLocateCheckTime = Utils::getCurrentTime(true);
+            }
+            if (printer && !printer->logistics1.empty() && printer->CheckResult == "1")
+            {
+                invokeCpp(domino_, "dominoPrint", Q_ARG(std::string, printer->logistics1),
+                          Q_ARG(std::string, printer->logistics2));
+                LogInfo("product process:print:number={},code1={},code2={}.", printer->bottleNum_, printer->logistics1,
+                        printer->logistics2);
+            }
+            if (remove)
+            {
+                plcDev_->writeDevice("b", "13004", "1", remove->isRemove_ ? "1" : "0");
+                product_->signalComplete();
             }
         }
-        // if (printer && !printer->logistics1.empty() && printer->locateCheckResult == "1")
-        // {
-        //     invokeCpp(domino_, "dominoPrint", Q_ARG(std::string, printer->logistics1),
-        //               Q_ARG(std::string, printer->logistics2));
-        //     LogInfo("product process:print:number={},code1={},code2={}.", printer->numBottom, printer->logistics1,
-        //             printer->logistics2);
-        // }
-        if (codeCheck)
+        else
         {
-            plcDev_->writeDevice("b", "13004", "1", codeCheck->OCRResult);
-
-            // 这里应该做流程结束保存数据记录的工作和清理工位。
-            // 保存到数据库
-            // todo
-            // 清理工位
-            circleProduct_->completeProduct();
+            product_->signalQR(number);
         }
     });
 }
 
-void AppFrame::AppFrameworkImpl::whenCognexRecv(const std::string &code)
+void AppFrame::AppFrameworkImpl::whenSignalCoding()
+{
+    Utils::asyncTask([this] {
+        auto ptrProduct = product_->signalCoding();
+        if (ptrProduct && !ptrProduct->logistics1.empty() && !ptrProduct->logistics2.empty())
+        {
+            invokeCpp(domino_, "dominoPrint", Q_ARG(std::string, ptrProduct->logistics1),
+                      Q_ARG(std::string, ptrProduct->logistics2));
+        }
+    });
+}
+
+void AppFrame::AppFrameworkImpl::whenSignaOCR()
+{
+    Utils::asyncTask([this] { product_->signalOCR(); });
+}
+
+void AppFrame::AppFrameworkImpl::whenSignaRemove()
+{
+    Utils::asyncTask([this] { product_->signalComplete(); });
+}
+
+void AppFrame::AppFrameworkImpl::afterCognexRecv(const std::string &code)
 {
     Utils::asyncTask([this, code] {
-        if (circleProduct_ == nullptr)
-            return;
-        if (code == "no read")
+        uint32_t number = product_->updateQRCode(code);
+        if (code == "No Read" || number == 0)
         {
-            // 失败逻辑
+            return;
         }
-        uint16_t number = circleProduct_->updateQRCode(code);
-        if (number)
-            invokeCpp(permission_, "sendQRCode", Q_ARG(const uint16_t, number), Q_ARG(std::string, code));
+        invokeCpp(permission_, "sendQRCode", Q_ARG(std::string, code));
     });
 }
 
-void AppFrame::AppFrameworkImpl::whenPermissionRecv(const uint16_t number, const std::string &describtion,
-                                                    const std::string &code1, const std::string &code2)
+void AppFrame::AppFrameworkImpl::afterPermissionRecv(const std::string &num, const std::string &code1,
+                                                     const std::string &code2)
 {
-    if (circleProduct_ == nullptr)
-        return;
-    circleProduct_->updateLogistics(number, describtion, code1, code2);
+    uint32_t number = Utils::anyFromString<uint32_t>(num);
+    product_->updateLogistics(number, code1, code2);
 }
 
-void AppFrame::AppFrameworkImpl::afterCaputureImage(const uint8_t windId, const cv::Mat &mat)
+void AppFrame::AppFrameworkImpl::afterCaputureImage(const uint8_t &type, const cv::Mat &mat)
 {
-    Utils::asyncTask([this, windId, image = mat.clone()] {
-        if (circleProduct_ == nullptr)
-            return;
+    Utils::asyncTask([this, type, image = mat.clone()] {
         uint32_t bottomNum = 0;
         std::string filePath;
         std::string modelName;
         QString currentDateTimeStr = QDateTime::currentDateTime().toString("yyyyMMdd_hhmmss_zzz");
-        switch (windId)
+        switch (type)
         {
         case 0: {
             cv::Mat newMat;
             cv::resize(image, newMat, {800, 800});
             modelName = "tangle";
-            bottomNum = plcDev_->getFIFOInfo().numPosition;
             filePath = strTanglePath_ + currentDateTimeStr.toStdString() + ".jpg";
-            circleProduct_->updateLocate(image, filePath);
+            bottomNum = product_->updateLocation(image, filePath);
             break;
         }
         case 1: {
             modelName = "ocr";
-            bottomNum = plcDev_->getFIFOInfo().numVerifyCoding;
             filePath = strOcrPath_ + currentDateTimeStr.toStdString() + ".jpg";
-            circleProduct_->updateOCR(image, filePath);
+            bottomNum = product_->updateOCR(image, filePath);
             break;
         }
         case 2: {
             modelName = "tangleCheck";
-            bottomNum = plcDev_->getFIFOInfo().numVerifyPos;
             filePath = strTangleCheckPath_ + currentDateTimeStr.toStdString() + ".jpg";
-            circleProduct_->updateLocateCheck(image, filePath);
+            bottomNum = product_->updateCheck(image, filePath);
             break;
         }
         default:
             break;
         }
-        std::string sendJson;
-        QByteArray sendBytes;
-        LogInfo("product process:send to algo:number={},model={},bytes={}.", bottomNum, windId, sendBytes.size());
-        Utils::makeJsonAndByteArray(image, bottomNum, "", modelName, filePath, sendJson, sendBytes);
-        invokeCpp(webManager_, "sendToALGO", Q_ARG(uint8_t, windId), Q_ARG(std::string, sendJson),
-                  Q_ARG(QByteArray, sendBytes));
+        LogInfo("product process:send to algo:number={},model={}.", bottomNum, type);
+        if (bottomNum > 0)
+        {
+            std::string sendJson;
+            QByteArray sendBytes;
+            Utils::makeJsonAndByteArray(image, bottomNum, "", modelName, filePath, sendJson, sendBytes);
+            invokeCpp(webManager_, "sendToALGO", Q_ARG(uint8_t, type), Q_ARG(std::string, sendJson),
+                      Q_ARG(QByteArray, sendBytes));
+        }
     });
 }
 
 void AppFrame::AppFrameworkImpl::processOCR(const std::string &jsonData)
 {
     Utils::asyncTask([this, jsonData] {
-        if (circleProduct_ == nullptr)
-            return;
         Json::Value jsValue = Utils::stringToJson(jsonData);
         uint32_t bottomNum = jsValue["bottomNum"].asUInt();
-        const auto ptrBottom = circleProduct_->getNumber(bottomNum);
+        jsValue = Utils::stringToJson(jsValue["box"].asString());
+        if (jsValue.empty())
+        {
+            return;
+        }
+        std::string result;
+        std::vector<OcrRes> ocrRes;
+        for (const auto &item : jsValue)
+        {
+            result += item["result"].asString();
+            std::string lefttop = item["lefttop"].asString();
+            std::string righttop = item["righttop"].asString();
+            std::string rightbottom = item["rightbottom"].asString();
+            std::string leftbottom = item["leftbottom"].asString();
+            // 解析字符串中的整数
+            int lefttopX, lefttopY, righttopX, righttopY, rightbottomX, rightbottomY, leftbottomX, leftbottomY;
+            sscanf(lefttop.c_str(), "[%d, %d]", &lefttopX, &lefttopY);
+            sscanf(righttop.c_str(), "[%d, %d]", &righttopX, &righttopY);
+            sscanf(rightbottom.c_str(), "[%d, %d]", &rightbottomX, &rightbottomY);
+            sscanf(leftbottom.c_str(), "[%d, %d]", &leftbottomX, &leftbottomY);
+            OcrRes resItem(item["result"].asString(), lefttopX, lefttopY, leftbottomX, leftbottomY, righttopX,
+                           righttopY, leftbottomX, leftbottomY);
+            ocrRes.push_back(std::move(resItem));
+        }
+        auto ptrOcr = product_->updateOCRResult(bottomNum, result);
+        cv::Mat mat = ptrOcr->OCRImage;
+        if (mat.empty())
+        {
+            LogWarn("ocrImage is null");
+            return;
+        }
+        QImage ocrImage = Utils::matToQImage(mat);
+        QPainter painter(&ocrImage);
+        for (auto &resItem : ocrRes)
+        {
+            drawOcrRes(ocrImage, resItem);
+        }
+        QString currentDateTimeStr = QDateTime::currentDateTime().toString("yyyyMMdd_hhmmss_zzz");
+        QByteArray byteArray;
+        QBuffer buffer(&byteArray);
+        buffer.open(QIODevice::WriteOnly);
+        ocrImage.save(&buffer, "jpg");
+        Utils::saveImageToFile(byteArray, strTangleResultPath_ + currentDateTimeStr.toStdString() + ".jpg");
+        invokeCpp(mapStorePainter_.at(mapWindId2Index_.at("OCR")), "updateImage", Q_ARG(QImage, ocrImage));
     });
 }
 
 void AppFrame::AppFrameworkImpl::processTangle(const std::string &jsonData)
 {
     Utils::asyncTask([this, jsonData] {
-        if (circleProduct_ == nullptr)
-            return;
         Json::Value jsValue = Utils::stringToJson(jsonData);
         uint32_t bottomNum = jsValue["bottomNum"].asUInt();
-        const auto ptrBottom = circleProduct_->getNumber(bottomNum);
-        if (ptrBottom == nullptr)
-        {
-            LogInfo("product process:recv from tangle:number not found.");
-            return;
-        }
-        cv::Mat mat = ptrBottom->locateImage;
-        if (mat.empty())
-        {
-            LogInfo("product process:recv from tangle:number={},mat is null.", bottomNum);
-            return;
-        }
         std::string result = "0";
         jsValue = Utils::stringToJson(jsValue["box"].asString());
         for (const auto &item : jsValue)
@@ -1048,7 +1110,18 @@ void AppFrame::AppFrameworkImpl::processTangle(const std::string &jsonData)
         }
         int tangleResult = std::atoi(result.c_str());
         tangleResult = (tangleResult + 98) % 360;
-        circleProduct_->updateLocateResult(bottomNum, std::to_string(tangleResult));
+        auto ptrBottle = product_->updateLocationResult(bottomNum, std::to_string(tangleResult));
+        if (ptrBottle == nullptr)
+        {
+            LogInfo("product process:recv from tangle:number not found.");
+            return;
+        }
+        cv::Mat mat = ptrBottle->LocationImage;
+        if (mat.empty())
+        {
+            LogInfo("product process:recv from tangle:number={},mat is null.", bottomNum);
+            return;
+        }
         result = "tangle; " + result + "; ";
         QImage Image = Utils::matToQImage(mat);
         drawText(Image, result.c_str());
@@ -1057,39 +1130,16 @@ void AppFrame::AppFrameworkImpl::processTangle(const std::string &jsonData)
         QBuffer buffer(&byteArray);
         buffer.open(QIODevice::WriteOnly);
         Image.save(&buffer, "jpg");
-        Utils::saveImageToFile(byteArray, strTangleResultPath_ + currentDateTimeStr.toStdString() + ".jpg");
-        invokeCpp(mapStorePainter_[DisplayWindows::LocationCamera], "updateImage", Q_ARG(QImage, Image));
+        Utils::saveImageToFile(byteArray, strOcrResultPath_ + currentDateTimeStr.toStdString() + ".jpg");
+        invokeCpp(mapStorePainter_.at(mapWindId2Index_.at("Location")), "updateImage", Q_ARG(QImage, Image));
     });
 }
 
-void AppFrame::AppFrameworkImpl::processTangleCheck(const std::string &jsonData)
+void AppFrame::AppFrameworkImpl::processCheck(const std::string &jsonData)
 {
     Utils::asyncTask([this, jsonData] {
-        if (circleProduct_ == nullptr)
-            return;
         Json::Value jsValue = Utils::stringToJson(jsonData);
         uint32_t bottomNum = jsValue["bottomNum"].asUInt();
-        const auto ptrBottom = circleProduct_->getNumber(bottomNum);
+        auto ptrBottle = product_->updateCheckResult(bottomNum, "0");
     });
-}
-
-void AppFrame::AppFrameworkImpl::whenLineCognex()
-{
-    if (lineProduct_ != nullptr)
-    {
-        lineProduct_->newProduct();
-    }
-}
-
-void AppFrame::AppFrameworkImpl::whenLineCoding()
-{
-    if (lineProduct_ != nullptr)
-    {
-        std::string code1, code2;
-        lineProduct_->updateCodingSigTime(code1, code2);
-        if (!code1.empty() && !code2.empty())
-        {
-            invokeCpp(domino_, "dominoPrint", Q_ARG(std::string, code1), Q_ARG(std::string, code2));
-        }
-    }
 }

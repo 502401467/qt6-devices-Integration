@@ -22,16 +22,16 @@ class AlertWapper
     {
         if (mapAlert.size() == 0)
             return;
-        Json::Value json;
+        QList<QVariantMap> sqlList;
         for (auto &[key, value] : mapAlert)
         {
-            Json::Value item;
-            item["register_address"] = key.c_str();
-            item["content"] = value.c_str();
-            item["state"] = 1;
-            json.append(item);
+            QVariantMap mapData;
+            mapData.insert("register_address", key.c_str());
+            mapData.insert("content", value.c_str());
+            mapData.insert("state", 1);
+            sqlList.append(mapData);
         }
-        PgsqlHelper::getSqlHelper().insertData(TABLE_ALARM_DATA, std::move(json));
+        PgsqlHelper::getSqlHelper().insertMultipleData("alarm_data", sqlList);
     }
     static void modifyAlert(std::map<std::string, std::string> &mapModify)
     {

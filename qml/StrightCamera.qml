@@ -1,4 +1,4 @@
-//import AppFrame 1.0
+import AppFrame 1.0
 import QtQuick 2.15
 import QtQuick.Controls 2.15
 import Qt5Compat.GraphicalEffects
@@ -47,13 +47,13 @@ GroupBox {
             anchors.bottomMargin: 0
         }
 
-        //        ImagePainter {
-        //            id: codeCheckCamera
-        //            objectName: "codeCheckCamera"
-        //            anchors.fill: parent
-        //            anchors.margins: 8
-        //            //anchors.topMargin: 35
-        //        }
+        ImagePainter {
+            id: ocr
+            objectName: "OCR"
+            anchors.fill: parent
+            anchors.margins: 8
+            //anchors.topMargin: 35
+        }
 
         Text {
             x: 40
@@ -63,7 +63,7 @@ GroupBox {
         }
 
         Image {
-            id: imageCodeCheck
+            id: imageLocate
             x: 10
             y: -25
             width: 28
@@ -278,7 +278,7 @@ GroupBox {
         height: 37
         text: qsTr("相机参数设置")
         onClicked: {
-            var component = Qt.createComponent("CameraParam.qml");
+            var component = Qt.createComponent("StrightCameraParam.qml");
             var window = component.createObject(cameraPage);
             window.show();
         }
@@ -422,7 +422,7 @@ GroupBox {
     }
 
     function refreshItemState() {
-        var jsRet = appMetaFlash.qmlCallExpected(MainWindow.ExpectedFunction.RefreshMainPage, "");
+        var jsRet = appMetaFlash.qmlCallExpected(StrightMainWindow.ExpectedFunction.RefreshStrightMainPage, "");
         var result = JSON.parse(jsRet);
         if (result.ok) {
             result.details.dominoState === "1" ? imagedomino.source = "file:///" + appdir + "/ico/green.png" : imagedomino.source = "file:///" + appdir + "/ico/red.png";
@@ -430,9 +430,6 @@ GroupBox {
             result.details.permissionState === "1" ? imagepermission.source = "file:///" + appdir + "/ico/green.png" : imagepermission.source = "file:///" + appdir + "/ico/red.png";
             result.details.plcState === "1" ? imageplc.source = "file:///" + appdir + "/ico/green.png" : imageplc.source = "file:///" + appdir + "/ico/red.png";
             result.details.image0 === "1" ? imageLocate.source = "file:///" + appdir + "/ico/green.png" : imageplc.source = "file:///" + appdir + "/ico/red.png";
-            result.details.image1 === "1" ? imageCodeCheck.source = "file:///" + appdir + "/ico/green.png" : imageplc.source = "file:///" + appdir + "/ico/red.png";
-            result.details.image2 === "1" ? imageLocateCheck.source = "file:///" + appdir + "/ico/green.png" : imageplc.source = "file:///" + appdir + "/ico/red.png";
-            textCountPauseWaste = result.details.textProduceState;
             textEquipmentSteps = result.details.textEquipmentSteps;
         }
     }

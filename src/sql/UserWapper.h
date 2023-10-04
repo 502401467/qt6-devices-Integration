@@ -17,10 +17,19 @@ class UserWapper
         std::string password = insertData["password"].asString();
         password = Utils::encrytByAES(password);
         //  将加密后的密码转换为 QString，并更新 QVariantMap 对象
-
-        insertData["password"] = password;
-
-        bool res = PgsqlHelper::getSqlHelper().insertData(TABLE_USER_NAME, std::move(insertData));
+        QVariantMap mapData;
+        mapData.insert("name", insertData["name"].asCString());
+        mapData.insert("password", password.c_str());
+        mapData.insert("camera_permission", insertData["camera_permission"].asBool());
+        mapData.insert("data_permission", insertData["data_permission"].asBool());
+        mapData.insert("alarm_permission", insertData["alarm_permission"].asBool());
+        mapData.insert("formula_permission", insertData["formula_permission"].asBool());
+        mapData.insert("sensor_permission", insertData["sensor_permission"].asBool());
+        mapData.insert("valve_permission", insertData["valve_permission"].asBool());
+        mapData.insert("power_permission", insertData["power_permission"].asBool());
+        mapData.insert("log_permission", insertData["log_permission"].asBool());
+        mapData.insert("user_manage_permission", insertData["user_manage_permission"].asBool());
+        bool res = PgsqlHelper::getSqlHelper().insertData("users", mapData);
         if (!res)
         {
             LogError("Failed to insert user data");

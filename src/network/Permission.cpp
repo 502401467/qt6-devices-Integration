@@ -3,10 +3,6 @@
 #include <QDebug>
 Permission::Permission(QObject *parent) : TCPClient(parent)
 {
-    mapSignals_[strCodeError] = std::bind([this] { emit codeError(); });
-    mapSignals_[strCodeNull] = std::bind([this] { emit codeNull(); });
-    mapSignals_[strSysEor1] = std::bind([this] { emit sysError(); });
-    mapSignals_[strSystemOk] = std::bind([this] { emit systemOk(); });
 }
 
 Permission::~Permission()
@@ -15,30 +11,26 @@ Permission::~Permission()
 
 void Permission::dealing(std::vector<unsigned char> buffer)
 {
-    std::string result(buffer.begin(), buffer.end());
-    LogWarn("product process: recieve peimisson : {}", result);
-    auto iter = mapSignals_.find(result);
-    if (iter != mapSignals_.end())
-    {
-        LogInfo("permission signal: {}", result);
-        iter->second();
-    }
+    std::string result(buffer.begin() + 4, buffer.end() - 2);
+    std::string number = result.substr(0, result.find_first_of(','));
+    std::string code = result.substr(result.find_first_of(','));
     std::string code1, code2;
-    if (result.length() == 30)
+    if (code.length() == 24)
     {
-        code1 = result.substr(4, 12);
-        code2 = result.substr(16, 12);
+        LogInfo("product process: recieve peimisson success: code = {}", result);
+        code1 = result.substr(0, 12);
+        code2 = result.substr(12);
     }
     else
     {
-        LogError("permission code error.");
+        code1 = code;
+        LogError("product process: recieve peimisson error: code = {}", result);
     }
-    emit codeRight(curNumber, describtion, code1, code2);
+    emit codeRight(number, code1, code2);
 }
-void Permission::sendQRCode(const uint16_t number, const std::string &code)
+void Permission::sendQRCode(const uint32_t num, const std::string &code)
 {
-    curNumber = number;
-    std::string cmd = strHead + code + strTail;
+    std::string cmd = strHead + std::to_string(num) + "," + code + strTail;
     QByteArray byteArray = QByteArray(cmd.c_str(), static_cast<int>(cmd.size()));
     sendData(byteArray);
 }

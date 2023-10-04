@@ -11,6 +11,7 @@
 #include <QSqlQuery>
 #include <QSqlRecord>
 #include <QVariant>
+#include <iostream>
 #include <list>
 class PgsqlHelper : public AppFrame::NonCopyable
 {
@@ -60,16 +61,9 @@ class PgsqlHelper : public AppFrame::NonCopyable
         return ret;
     }
 
-    bool insertData(const std::string &tableName, const Json::Value &&jsValue) // ok
+    bool insertData(const std::string &tableName, const QVariantMap &data)
     {
         bool ret = true;
-
-        if (jsValue.isNull())
-        {
-            // 如果 jsValue 是空，无需处理
-            return false;
-        }
-
         QSqlDatabase *connect = pool_->getConnection();
         if (connect == nullptr)
         {
@@ -77,90 +71,97 @@ class PgsqlHelper : public AppFrame::NonCopyable
         }
 
         QSqlQuery query(*connect);
-        // 判断 jsValue 是数组还是对象
-        if (jsValue.isArray())
-        {
-            // 构建批量插入数据的SQL语句
-            QString sql = fmt::format("INSERT INTO \"{}\" (", tableName.c_str()).c_str();
-            QString values;
-            QVariantList params;
-            bool bAddfield = false;
 
-            for (const Json::Value &data : jsValue)
+        QString sqlQuery = "INSERT INTO " + QString::fromStdString(tableName) + " (";
+        QString placeholders;
+        QStringList keys;
+
+        for (const QString &key : data.keys())
+        {
+            if (data[key].isNull() || !data[key].isValid() || data[key] == "")
             {
-                if (!data.isObject())
-                {
-                    // 跳过非对象类型
-                    continue;
-                }
-                QString valuePlaceholders;
-                for (auto iter = data.begin(); iter != data.end(); ++iter)
-                {
-                    if (!bAddfield)
-                    {
-                        sql += QString(iter.name().c_str()) + ", ";
-                    }
-                    valuePlaceholders += "?, ";
-                    QVariant curVal;
-                    if (iter->isBool())
-                        curVal = iter->asBool();
-                    if (iter->isInt())
-                        curVal = iter->asInt();
-                    if (iter->isDouble())
-                        curVal = iter->asFloat();
-                    if (iter->isString())
-                        curVal = iter->asCString();
-                    params << curVal;
-                }
-                bAddfield = true;
-                valuePlaceholders.chop(2); // 去除最后的逗号和空格
-                values += "(" + valuePlaceholders + "), ";
+                continue; // 跳过空值字段
             }
-            sql.chop(2);    // 去除最后的逗号和空格
-            values.chop(2); // 去除最后的逗号和空格
-            sql += ") VALUES " + values;
-            query.prepare(sql);
-            for (int i = 0; i < params.size(); ++i)
-            {
-                query.addBindValue(params[i].toString());
-            }
+
+            keys << key;
+            placeholders += "?,";
         }
-        else if (jsValue.isObject())
-        {
-            // 直接插入单个对象
-            QString sql = "INSERT INTO " + QString::fromStdString(tableName) + "(";
-            QString values;
-            QVariantList params;
 
-            QString valuePlaceholders;
-            for (auto iter = jsValue.begin(); iter != jsValue.end(); ++iter)
-            {
-                sql += QString(iter.name().c_str()) + ", ";
-                valuePlaceholders += "?, ";
-                QVariant curVal;
-                if (iter->isBool())
-                    curVal = iter->asBool();
-                if (iter->isInt())
-                    curVal = iter->asInt();
-                if (iter->isDouble())
-                    curVal = iter->asFloat();
-                if (iter->isString())
-                    curVal = iter->asCString();
-                params << curVal;
-            }
-            valuePlaceholders.chop(2); // 去除最后的逗号和空格
-            values += "(" + valuePlaceholders + ")";
-            sql.chop(2); // 去除最后的逗号和空格
-            sql += ") VALUES " + values;
-            query.prepare(sql);
-            for (int i = 0; i < params.size(); ++i)
-            {
-                query.addBindValue(params[i].toString());
-            }
-            qDebug() << sql;
+        if (keys.isEmpty())
+        {
+            // 所有字段都为空值，不执行插入操作
+            pool_->releaseConnection(connect);
+            return true;
+        }
+
+        sqlQuery += keys.join(", ") + ") VALUES (" + placeholders.left(placeholders.length() - 1) + ");";
+        query.prepare(sqlQuery);
+        for (const QString &key : keys)
+        {
+            query.addBindValue(data[key]);
         }
 
         if (!query.exec())
+        {
+            LogError("Failed to insert data: {}", query.lastError().text().toStdString());
+            ret = false;
+        }
+        pool_->releaseConnection(connect);
+        return ret;
+    }
+
+    bool insertMultipleData(const std::string &tableName, const QList<QVariantMap> &dataList)
+    {
+        bool ret = true;
+        QSqlDatabase *connect = pool_->getConnection();
+        if (connect == nullptr)
+        {
+            return false;
+        }
+
+        QSqlQuery query(*connect);
+        QString sqlQuery = "INSERT INTO " + QString::fromStdString(tableName) + " (";
+        QString placeholders;
+        QStringList keys;
+
+        if (dataList.isEmpty())
+        {
+            // No data to insert, return true as a special case
+            pool_->releaseConnection(connect);
+            return true;
+        }
+
+        // Use the first QVariantMap in dataList to extract keys
+        const QVariantMap &firstData = dataList.first();
+        for (const QString &key : firstData.keys())
+        {
+            keys << key;
+            placeholders += "?,";
+        }
+
+        sqlQuery += keys.join(", ") + ") VALUES ";
+
+        // Add placeholders for each row
+        for (int i = 0; i < dataList.size(); ++i)
+        {
+            placeholders += "(" + placeholders.left(placeholders.length() - 1) + "),";
+        }
+
+        sqlQuery += placeholders.left(placeholders.length() - 1); // Remove the trailing comma
+
+        query.prepare(sqlQuery);
+
+        // Bind values for each row
+        int index = 0;
+        for (const QVariantMap &data : dataList)
+        {
+            for (const QString &key : keys)
+            {
+                query.bindValue(index++, data[key]);
+            }
+        }
+
+        if (!query.execBatch())
         {
             LogError("Failed to insert data: {}", query.lastError().text().toStdString());
             ret = false;
